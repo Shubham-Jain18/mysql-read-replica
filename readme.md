@@ -106,7 +106,9 @@ SHOW SLAVE STATUS\G
 ```
 Master:
 ![Master Status](Screenshot%20from%202026-03-27%2014-36-53.png)
+
 Slave:
+
 ![Final Output](Screenshot%20from%202026-03-27%2014-37-27.png)
 
 ## 4. Troubleshooting
