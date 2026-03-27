@@ -1,4 +1,4 @@
-# MySQL Read Replica Setup Guide
+# MySQL Replication Setup Guide: Binlog & GTID Methods
 
 ## 1. System Environment Preparation
 Execute to remove OS security restrictions and release port bindings.
@@ -30,79 +30,91 @@ mysqld --no-defaults --initialize-insecure --user=$(whoami) --datadir="$PWD/mysq
 mysqld --no-defaults --initialize-insecure --user=$(whoami) --datadir="$PWD/mysql-slave"
 ```
 
-## 3. Instance Startup
-Launch the background daemons using unique ports, sockets, and server IDs.
+---
 
-### Start Master (Port 3306)
+## Method A: Traditional Binlog Replication
+Uses specific file names and byte offsets to track replication progress.
+
+### 1. Instance Startup (Binlog Mode)
 ```bash
-mysqld --no-defaults --user=$(whoami) \
-  --datadir="$PWD/mysql-master" \
-  --port=3306 \
-  --server-id=1 \
-  --mysqlx=OFF \
-  --log-bin="$PWD/mysql-master/mysql-bin" \
-  --socket="$PWD/mysql-master/mysql.sock" \
-  --pid-file="$PWD/mysql-master/mysql.pid" \
-  --lc-messages-dir=/usr/share/mysql \
-  --log-error="$PWD/mysql-master/error.log" &
+# Start Master
+mysqld --no-defaults --user=$(whoami) --datadir="$PWD/mysql-master" --port=3306 --server-id=1 --mysqlx=OFF --log-bin="$PWD/mysql-master/mysql-bin" --socket="$PWD/mysql-master/mysql.sock" --pid-file="$PWD/mysql-master/mysql.pid" --lc-messages-dir=/usr/share/mysql --log-error="$PWD/mysql-master/error.log" &
+
+# Start Slave
+mysqld --no-defaults --user=$(whoami) --datadir="$PWD/mysql-slave" --port=3307 --server-id=2 --mysqlx=OFF --socket="$PWD/mysql-slave/mysql.sock" --pid-file="$PWD/mysql-slave/mysql.pid" --lc-messages-dir=/usr/share/mysql --log-error="$PWD/mysql-slave/error.log" &
 ```
 
-### Start Slave (Port 3307)
-```bash
-mysqld --no-defaults --user=$(whoami) \
-  --datadir="$PWD/mysql-slave" \
-  --port=3307 \
-  --server-id=2 \
-  --mysqlx=OFF \
-  --socket="$PWD/mysql-slave/mysql.sock" \
-  --pid-file="$PWD/mysql-slave/mysql.pid" \
-  --lc-messages-dir=/usr/share/mysql \
-  --log-error="$PWD/mysql-slave/error.log" &
-```
-
-## 4. Replication Configuration
-
-### Master Configuration
-Connect via Master socket:
-`mysql -u root --socket="$PWD/mysql-master/mysql.sock"`
-
+### 2. Configuration
+**On Master:**
 ```sql
--- Use mysql_native_password for local socket compatibility
 CREATE USER 'replica_user'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'replica_password';
 GRANT REPLICATION SLAVE ON *.* TO 'replica_user'@'127.0.0.1';
 FLUSH PRIVILEGES;
-
--- Capture File and Position values
-SHOW MASTER STATUS;
+SHOW MASTER STATUS; -- Record File and Position
 ```
 
-### Slave Configuration
-Connect via Slave socket:
-`mysql -u root --socket="$PWD/mysql-slave/mysql.sock"`
-
+**On Slave:**
 ```sql
 CHANGE MASTER TO
     MASTER_HOST='127.0.0.1',
     MASTER_USER='replica_user',
     MASTER_PASSWORD='replica_password',
     MASTER_PORT=3306,
-    MASTER_LOG_FILE='mysql-bin.000001',
-    MASTER_LOG_POS=889;
-
+    MASTER_LOG_FILE='[FILE_FROM_MASTER]',
+    MASTER_LOG_POS=[POS_FROM_MASTER];
 START SLAVE;
 ```
 
-## 5. Troubleshooting
-If SHOW SLAVE STATUS reports Error 1396 (User already exists), skip the conflicting transaction:
+---
+
+## Method B: GTID-Based Replication
+Uses Global Transaction IDs for automatic synchronization and simplified failover.
+
+### 1. Instance Startup (GTID Mode)
+```bash
+# Start Master with GTID
+mysqld --no-defaults --user=$(whoami) --datadir="$PWD/mysql-master" --port=3306 --server-id=1 --mysqlx=OFF --log-bin="$PWD/mysql-master/mysql-bin" --socket="$PWD/mysql-master/mysql.sock" --pid-file="$PWD/mysql-master/mysql.pid" --lc-messages-dir=/usr/share/mysql --gtid-mode=ON --enforce-gtid-consistency=ON --log-error="$PWD/mysql-master/error.log" &
+
+# Start Slave with GTID
+mysqld --no-defaults --user=$(whoami) --datadir="$PWD/mysql-slave" --port=3307 --server-id=2 --mysqlx=OFF --socket="$PWD/mysql-slave/mysql.sock" --pid-file="$PWD/mysql-slave/mysql.pid" --lc-messages-dir=/usr/share/mysql --gtid-mode=ON --enforce-gtid-consistency=ON --log-slave-updates=ON --log-error="$PWD/mysql-slave/error.log" &
+```
+
+### 2. Configuration
+**On Master:**
+Same as Method A (Ensure `replica_user` exists).
+
+**On Slave:**
+```sql
+STOP SLAVE;
+CHANGE MASTER TO
+    MASTER_HOST='127.0.0.1',
+    MASTER_USER='replica_user',
+    MASTER_PASSWORD='replica_password',
+    MASTER_PORT=3306,
+    MASTER_AUTO_POSITION = 1;
+START SLAVE;
+```
+
+---
+
+## 3. Verification and Final Output
+Confirm data propagation by checking the Slave instance.
+
+```sql
+SHOW SLAVE STATUS\G
+-- Ensure Slave_IO_Running and Slave_SQL_Running are both 'Yes'
+```
+Master:
+![Master Status](Screenshot%20from%202026-03-27%2014-36-53.png)
+Slave:
+![Final Output](Screenshot%20from%202026-03-27%2014-37-27.png)
+
+## 4. Troubleshooting
+If the SQL thread stops due to a duplicate key or existing user (Error 1396):
 
 ```sql
 STOP SLAVE;
-SET GLOBAL SQL_SLAVE_SKIP_COUNTER = 1;
+SET GLOBAL SQL_SLAVE_SKIP_COUNTER = 1; -- Only for Binlog Mode
 START SLAVE;
 ```
-
-## 6. Verification and Final Output
-Confirm data propagation by checking the Slave instance.
-
-![Master Setup](Screenshot%20from%202026-03-27%2014-36-53.png)
-![Final Output](Screenshot%20from%202026-03-27%2014-37-27.png)
+*Note: For GTID mode, skip transactions by injecting an empty transaction with the offending GTID.*
